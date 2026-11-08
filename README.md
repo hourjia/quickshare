@@ -229,6 +229,19 @@ cd ..\frontend
 pnpm build
 ```
 
+## 持续集成
+
+`.github/workflows/docker-build.yml` 在推送到 `main` 后自动运行（也可在 Actions 页手动触发），**分两个 job 并行构建两个镜像**：
+
+| Job | 构建内容 | 构建后校验 |
+| --- | --- | --- |
+| `backend` | `backend/deploy/Dockerfile`，上下文 `./backend` | 镜像内 `django`、`channels`、`channels_redis`、`uvicorn`、`psycopg` 可导入 |
+| `frontend` | `frontend/deploy/Dockerfile`，上下文 `./frontend` | `/srv/index.html` 与 `/srv/assets` 存在 |
+
+两个 job 互不依赖，任一个失败都不影响另一个；使用 GitHub Actions 缓存（`type=gha`，按 backend/frontend 分 scope）加速重复构建。
+
+当前工作流**只构建、不推送镜像仓库**。要发布镜像，在 `docker/build-push-action` 上把 `push` 改为 `true`，补充 `docker/login-action` 登录步骤，并把 `permissions` 加上 `packages: write` 即可。
+
 ### 浏览器注意事项
 
 - 支持 Origin Private File System 的浏览器会先流式写入浏览器私有文件系统，接收完成后显示“保存文件”按钮，不会把 1 GB 文件聚合到 JavaScript 内存。

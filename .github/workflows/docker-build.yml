@@ -1,0 +1,73 @@
+name: Docker 镜像构建
+
+# 触发条件：主分支推送后构建，也支持手动触发。
+# 本工作流只构建镜像用于验证 Dockerfile，不推送到镜像仓库；
+# 以后要发布镜像时，把下方 build-push-action 的 push 改为 true 并补充登录步骤即可。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 构建后端镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/deploy/Dockerfile
+          push: false
+          load: true
+          tags: quickshare-backend:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: 校验后端镜像
+        run: |
+          docker image inspect quickshare-backend:${{ github.sha }} > /dev/null
+          docker run --rm --entrypoint python quickshare-backend:${{ github.sha }} \
+            -c "import django, channels, channels_redis, uvicorn, psycopg; print('deps ok')"
+
+  frontend:
+    name: 构建前端镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/deploy/Dockerfile
+          push: false
+          load: true
+          tags: quickshare-frontend:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: 校验前端镜像
+        run: |
+          docker image inspect quickshare-frontend:${{ github.sha }} > /dev/null
+          docker run --rm --entrypoint sh quickshare-frontend:${{ github.sha }} \
+            -c 'test -s /srv/index.html && test -d /srv/assets && echo "static ok"'
