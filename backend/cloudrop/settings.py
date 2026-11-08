@@ -19,11 +19,41 @@ def env_list(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
 
-def redis_host_config(address: str) -> dict[str, str | None]:
+def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ImproperlyConfigured(f"{name} 必须是整数，当前为 {raw!r}") from error
+    if value < minimum:
+        raise ImproperlyConfigured(f"{name} 不能小于 {minimum}，当前为 {value}")
+    return value
+
+
+def env_optional_seconds(name: str) -> float | None:
+    """读取可选的超时秒数；空值或 none/off/disabled 表示不启用超时。"""
+    raw = os.getenv(name, "").strip().lower()
+    if raw in {"", "none", "off", "disabled"}:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ImproperlyConfigured(f"{name} 必须是秒数或 none，当前为 {raw!r}") from error
+    if value <= 0:
+        raise ImproperlyConfigured(f"{name} 必须大于 0，当前为 {value}")
+    return value
+
+
+def redis_host_config(address: str) -> dict[str, object]:
+    # 超时默认关闭：channel layer 是长连接，客户端超时会导致消息被静默丢弃。
     return {
         "address": address,
-        "socket_timeout": None,
-        "socket_connect_timeout": None,
+        "socket_timeout": env_optional_seconds("CLOUDROP_REDIS_SOCKET_TIMEOUT"),
+        "socket_connect_timeout": env_optional_seconds(
+            "CLOUDROP_REDIS_SOCKET_CONNECT_TIMEOUT"
+        ),
     }
 
 
@@ -126,18 +156,32 @@ CLOUDROP_TURN_URLS = env_list("CLOUDROP_TURN_URLS")
 CLOUDROP_TURN_SECRET = os.getenv("CLOUDROP_TURN_SECRET", "")
 CLOUDROP_TURN_CREDENTIAL_TTL = int(os.getenv("CLOUDROP_TURN_CREDENTIAL_TTL", "3600"))
 
-if TESTING:
+# Redis 在服务器上是独立进程，全部连接参数只能由环境变量提供，代码不保留本机地址兜底。
+CLOUDROP_CHANNEL_LAYER = os.getenv("CLOUDROP_CHANNEL_LAYER", "redis").strip().lower()
+if CLOUDROP_CHANNEL_LAYER not in {"redis", "memory"}:
+    raise ImproperlyConfigured(
+        f"CLOUDROP_CHANNEL_LAYER 只能是 redis 或 memory，当前为 {CLOUDROP_CHANNEL_LAYER!r}"
+    )
+
+if TESTING or CLOUDROP_CHANNEL_LAYER == "memory":
+    # 测试与单进程部署：通道层留在进程内存里，不需要 Redis。
     CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 else:
-    REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/1")
+    REDIS_URL = os.getenv("REDIS_URL", "").strip()
+    if not REDIS_URL:
+        raise ImproperlyConfigured(
+            "REDIS_URL is required（Redis 作为独立进程提供跨进程实时通道）。"
+            "请提供完整连接串，例如 redis://:密码@10.0.0.8:6379/5；"
+            "单进程部署可设置 CLOUDROP_CHANNEL_LAYER=memory 跳过 Redis。"
+        )
     CHANNEL_LAYERS = {
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
                 "hosts": [redis_host_config(REDIS_URL)],
-                "prefix": os.getenv("CLOUDROP_REDIS_PREFIX", "cloudrop"),
-                "capacity": 1000,
-                "expiry": 60,
+                "prefix": os.getenv("CLOUDROP_REDIS_PREFIX", "cloudrop").strip() or "cloudrop",
+                "capacity": env_int("CLOUDROP_REDIS_CAPACITY", 1000),
+                "expiry": env_int("CLOUDROP_REDIS_EXPIRY", 60),
             },
         }
     }

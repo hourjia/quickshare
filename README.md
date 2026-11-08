@@ -44,7 +44,7 @@
 - `backend/cloudrop`、`backend/transfer`：Django 5.2、Channels、认证安全状态、配对事务与 WebRTC 信令。
 - `frontend/`：React 19、Ant Design 6、Vite、TypeScript。
 - PostgreSQL：持久化安全状态和短生命周期配对记录。
-- Redis：Django Channels 跨进程消息通道，使用独立逻辑数据库和 `cloudrop` 键前缀。
+- Redis：服务器上独立进程，作为 Channels 跨进程消息通道，连接参数全部来自环境变量。
 - Caddy：HTTPS、静态前端、`/api` 与 `/ws` 反向代理。
 - Coturn：无法建立浏览器直连时实时中继 WebRTC 流量。
 
@@ -55,18 +55,62 @@ Redis 只承担一件事：Channels 的 channel layer，即 WebSocket 的跨进�
 `channel_name` 只是通道层内部的投递地址，真正的实时投递靠 channel layer。因此：
 
 - `UVICORN_WORKERS > 1` 或多副本时，**Redis 是必需的**：两个页面的连接可能落在不同进程。
-- 只有单进程（`UVICORN_WORKERS=1` 且单副本）才可以用 `channels.layers.InMemoryChannelLayer` 去掉 Redis。
+- 只有单进程（`UVICORN_WORKERS=1` 且单副本）才可以用 `channels.layers.InMemoryChannelLayer` 去掉 Redis，设置 `CLOUDROP_CHANNEL_LAYER=memory` 即可。
 - 测试模式（`CLOUDROP_TESTING=true`）已自动使用进程内通道，无需 Redis。
+
+### Redis 连接配置
+
+Redis 在服务器上是独立进程（本机 systemd、独立容器、或另一台主机都可以），应用只通过环境变量连接。**代码里没有 `127.0.0.1:6379` 这类兜底地址**：生产模式下缺少 `REDIS_URL` 会直接启动失败，而不是静默连到本机。
+
+| 变量 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `REDIS_URL` | 是（`CLOUDROP_CHANNEL_LAYER=redis` 时） | 无 | 完整连接串，如 `redis://:密码@10.0.0.8:6379/5`、`rediss://...` |
+| `CLOUDROP_CHANNEL_LAYER` | 否 | `redis` | `redis` 或 `memory`（单进程，不使用 Redis） |
+| `CLOUDROP_REDIS_PREFIX` | 否 | `cloudrop` | 与其他项目共享实例时的键前缀 |
+| `CLOUDROP_REDIS_CAPACITY` | 否 | `1000` | 单通道可缓冲的消息数 |
+| `CLOUDROP_REDIS_EXPIRY` | 否 | `60` | 消息最长滞留秒数 |
+| `CLOUDROP_REDIS_SOCKET_TIMEOUT` | 否 | `none` | 读写超时秒数；`none` 表示不设限 |
+| `CLOUDROP_REDIS_SOCKET_CONNECT_TIMEOUT` | 否 | `none` | 连接超时秒数；`none` 表示不设限 |
+
+数值类变量填错会在启动时报 `ImproperlyConfigured`，不会带病运行。超时默认关闭是有意为之：channel layer 是长连接，客户端超时会让消息被静默丢弃。
+
+逻辑数据库编号仍建议选一个未被其他项目占用的，例如 `/5`；Redis Cluster 模式只能使用 db 0，此时靠 `CLOUDROP_REDIS_PREFIX` 隔离键名。URL 中的密码若包含 `@`、`:`、`/` 等字符，必须百分号编码。
+
+## 配置来源与环境划分
+
+应用只从**进程环境变量**读取配置，不读取任何配置文件。本地与正式环境的差别只在于「变量由谁提供」：
+
+| 环境 | 变量来源 | 是否存在 `.env` |
+| --- | --- | --- |
+| 正式环境 | 部署平台注入：systemd `Environment=`、执行 `docker compose` 时的 shell 环境、Kubernetes Secret 等 | **没有**，服务器上不放 `.env` |
+| 本地测试 | `deploy/.env`（由 `deploy/.env.example` 复制而来） | 有，已被 `.gitignore` 忽略 |
+
+`*.env.example` 只是变量清单与填写说明，本身不参与运行。两个环境使用**同一套变量名**，只是取值不同；镜像构建时 `.env` 已被 `.dockerignore` 排除，不会打进镜像。
 
 ## 部署方式一：组合部署（推荐）
 
 前后端仍是两个独立镜像，但由同一个 Caddy 提供同源访问，Cookie 与 WebSocket 都不需要跨域配置。
+
+本地联调（`.env` 只在这里用，不要复制到服务器）：
 
 ```bash
 cd deploy
 cp .env.example .env      # 至少替换域名、DJANGO_SECRET_KEY、CLOUDROP_ACCESS_PASSWORD、DATABASE_URL、REDIS_URL、TURN 相关
 docker compose up -d --build
 ```
+
+正式环境（服务器上没有 `.env`）：compose 只对 `${...}` 做插值，变量从执行环境来。
+
+```bash
+cd deploy
+export CLOUDROP_DOMAIN=drop.example.com
+export DJANGO_SECRET_KEY=... CLOUDROP_ACCESS_PASSWORD=...
+export DATABASE_URL=... REDIS_URL=...
+export CLOUDROP_TURN_SECRET=... CLOUDROP_TURN_REALM=... CLOUDROP_TURN_EXTERNAL_IP=...
+docker compose up -d --build
+```
+
+用 systemd 托管时，把同样的变量写进 unit 的 `Environment=` / `EnvironmentFile=`；用 Kubernetes 时改用 Secret。必填变量缺失时 compose 会直接报错（`${VAR:?提示}`），不会带病启动。
 
 容器启动时会自动执行数据库迁移和过期配对记录清理。健康检查地址为 `/api/health`。
 
@@ -82,10 +126,15 @@ docker compose up -d --build
 cd backend
 docker build -f deploy/Dockerfile -t cloudrop-backend .
 docker run -d --name cloudrop-backend \
-  --env-file .env \
+  -e DJANGO_SECRET_KEY=... \
+  -e CLOUDROP_ACCESS_PASSWORD=... \
+  -e DATABASE_URL=... \
+  -e REDIS_URL=... \
   -p 8000:8000 \
   cloudrop-backend
 ```
+
+变量从运行环境传入（`-e`、systemd、平台 Secret 均可），不要把 `.env` 放到服务器上。完整变量清单见 `backend/.env.example`。
 
 也可以直接跑 `uvicorn cloudrop.asgi:application --host 0.0.0.0 --port 8000 --workers 2`，环境变量参考 `backend/.env.example`。
 
@@ -130,7 +179,7 @@ pnpm build          # 产出 frontend/dist
 
 锁定状态在 PostgreSQL 中持久化。解除锁定的唯一正常流程：
 
-1. 修改 `.env` 中的 `CLOUDROP_ACCESS_PASSWORD`。
+1. 修改部署环境提供的 `CLOUDROP_ACCESS_PASSWORD`（服务器上没有 `.env`，改的是平台/unit 里的变量）。
 2. 重建或重启后端容器。
 3. 服务端检测密码指纹变化后，原子地解除锁定、增加安全代次并清空失败计数。
 
@@ -138,7 +187,9 @@ pnpm build          # 产出 frontend/dist
 
 ## 本地开发
 
-前端与后端分开启动。后端默认使用 SQLite；实时连接仍需要 Redis，也可以用测试模式的进程内通道进行单进程开发。
+前端与后端分开启动。后端默认使用 SQLite；实时连接默认走外部 Redis，本地没有 Redis 时设 `CLOUDROP_TESTING=true`（或 `CLOUDROP_CHANNEL_LAYER=memory`）改用进程内通道。
+
+也可以把变量写进 `backend/.env`（同样被 `.gitignore` 忽略），启动时用 `uvicorn ... --env-file .env` 加载，避免每次手动 export；`manage.py` 子命令需要在同一 shell 里先导出同名变量。
 
 ```powershell
 cd backend

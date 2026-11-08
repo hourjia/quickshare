@@ -1,13 +1,44 @@
-# 前后端拆分后的组合部署：后端 = 纯 uvicorn 服务，网关 = 前端静态资源 + 反向代理，
-# Coturn 仅在需要中继 WebRTC 时保留。PostgreSQL 与 Redis 使用既有实例，本文件不创建。
+# 组合部署：后端 = 纯 uvicorn 服务，网关 = 前端静态资源 + 反向代理，
+# Coturn 仅在需要中继 WebRTC 时保留。PostgreSQL 与 Redis 是外部既有实例，本文件不创建。
+#
+# 配置来源（重要）：
+#   - 生产：服务器上没有 .env 文件。变量由部署平台注入——systemd 的 Environment=、
+#     systemctl set-environment、Kubernetes Secret，或执行 docker compose 时的 shell 环境。
+#     本文件只对 ${...} 做变量插值，不读取任何文件。
+#   - 本地：在 deploy/ 下把 .env.example 复制成 .env（.gitignore 已忽略），
+#     compose 会自动用它给 ${...} 插值，与生产使用的是同一套变量名。
+#   - 必填变量写成 ${VAR:?提示}：缺失时 compose 直接报错，不会带病启动。
 services:
   backend:
     build:
       context: ../backend
       dockerfile: deploy/Dockerfile
-    env_file:
-      - .env
+    environment:
+      # —— 必填 ——
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY 未设置}
+      CLOUDROP_ACCESS_PASSWORD: ${CLOUDROP_ACCESS_PASSWORD:?CLOUDROP_ACCESS_PASSWORD 未设置}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL 未设置}
+      # —— 基础运行 ——
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-}
+      DJANGO_SECURE_COOKIES: ${DJANGO_SECURE_COOKIES:-true}
+      CLOUDROP_TRUSTED_PROXY_COUNT: ${CLOUDROP_TRUSTED_PROXY_COUNT:-1}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      # —— Redis：外部独立进程，缺 REDIS_URL 时后端启动即失败 ——
+      REDIS_URL: ${REDIS_URL:-}
+      CLOUDROP_CHANNEL_LAYER: ${CLOUDROP_CHANNEL_LAYER:-redis}
+      CLOUDROP_REDIS_PREFIX: ${CLOUDROP_REDIS_PREFIX:-cloudrop}
+      CLOUDROP_REDIS_CAPACITY: ${CLOUDROP_REDIS_CAPACITY:-1000}
+      CLOUDROP_REDIS_EXPIRY: ${CLOUDROP_REDIS_EXPIRY:-60}
+      CLOUDROP_REDIS_SOCKET_TIMEOUT: ${CLOUDROP_REDIS_SOCKET_TIMEOUT:-none}
+      CLOUDROP_REDIS_SOCKET_CONNECT_TIMEOUT: ${CLOUDROP_REDIS_SOCKET_CONNECT_TIMEOUT:-none}
+      # —— WebRTC 中继（不启用 TURN 时只下发 STUN）——
+      CLOUDROP_TURN_URLS: ${CLOUDROP_TURN_URLS:-}
+      CLOUDROP_TURN_SECRET: ${CLOUDROP_TURN_SECRET:-}
+      CLOUDROP_TURN_CREDENTIAL_TTL: ${CLOUDROP_TURN_CREDENTIAL_TTL:-3600}
     restart: unless-stopped
+    # 仅当 Redis/PostgreSQL 跑在宿主机上时才需要；用容器名或域名连接可删掉。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -25,8 +56,9 @@ services:
     build:
       context: ../frontend
       dockerfile: deploy/Dockerfile
-    env_file:
-      - .env
+    environment:
+      CLOUDROP_DOMAIN: ${CLOUDROP_DOMAIN:?CLOUDROP_DOMAIN 未设置}
+      CLOUDROP_BACKEND_UPSTREAM: ${CLOUDROP_BACKEND_UPSTREAM:-backend:8000}
     restart: unless-stopped
     depends_on:
       backend:
@@ -38,8 +70,10 @@ services:
 
   coturn:
     image: coturn/coturn:4.6.3
-    env_file:
-      - .env
+    environment:
+      CLOUDROP_TURN_SECRET: ${CLOUDROP_TURN_SECRET:?CLOUDROP_TURN_SECRET 未设置}
+      CLOUDROP_TURN_REALM: ${CLOUDROP_TURN_REALM:?CLOUDROP_TURN_REALM 未设置}
+      CLOUDROP_TURN_EXTERNAL_IP: ${CLOUDROP_TURN_EXTERNAL_IP:?CLOUDROP_TURN_EXTERNAL_IP 未设置}
     restart: unless-stopped
     network_mode: host
     command:
