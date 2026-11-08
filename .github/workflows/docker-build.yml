@@ -1,8 +1,7 @@
 name: Docker 镜像构建
 
-# 触发条件：主分支推送后构建，也支持手动触发。
-# 本工作流只构建镜像用于验证 Dockerfile，不推送到镜像仓库；
-# 以后要发布镜像时，把下方 build-push-action 的 push 改为 true 并补充登录步骤即可。
+# 触发条件：主分支推送后构建并发布镜像，也支持手动触发。
+# 发布目标为 GitHub Container Registry（GHCR），使用仓库自带的 GITHUB_TOKEN，无需额外密钥。
 on:
   push:
     branches: [main]
@@ -10,10 +9,15 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: docker-build-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   backend:
@@ -40,9 +44,27 @@ jobs:
 
       - name: 校验后端镜像
         run: |
-          docker image inspect quickshare-backend:${{ github.sha }} > /dev/null
-          docker run --rm --entrypoint python quickshare-backend:${{ github.sha }} \
+          docker image inspect quickshare-backend:${GITHUB_SHA} > /dev/null
+          docker run --rm --entrypoint python quickshare-backend:${GITHUB_SHA} \
             -c "import django, channels, channels_redis, uvicorn, psycopg; print('deps ok')"
+
+      - name: 登录 GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 推送后端镜像
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGE="${REGISTRY}/${OWNER}/quickshare-backend"
+          docker tag "quickshare-backend:${GITHUB_SHA}" "${IMAGE}:${GITHUB_SHA}"
+          docker tag "quickshare-backend:${GITHUB_SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          echo "已推送 ${IMAGE}:${GITHUB_SHA} 与 ${IMAGE}:latest"
 
   frontend:
     name: 构建前端镜像
@@ -68,6 +90,24 @@ jobs:
 
       - name: 校验前端镜像
         run: |
-          docker image inspect quickshare-frontend:${{ github.sha }} > /dev/null
-          docker run --rm --entrypoint sh quickshare-frontend:${{ github.sha }} \
+          docker image inspect quickshare-frontend:${GITHUB_SHA} > /dev/null
+          docker run --rm --entrypoint sh quickshare-frontend:${GITHUB_SHA} \
             -c 'test -s /srv/index.html && test -d /srv/assets && echo "static ok"'
+
+      - name: 登录 GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 推送前端镜像
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGE="${REGISTRY}/${OWNER}/quickshare-frontend"
+          docker tag "quickshare-frontend:${GITHUB_SHA}" "${IMAGE}:${GITHUB_SHA}"
+          docker tag "quickshare-frontend:${GITHUB_SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          echo "已推送 ${IMAGE}:${GITHUB_SHA} 与 ${IMAGE}:latest"

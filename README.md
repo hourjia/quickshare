@@ -240,7 +240,40 @@ pnpm build
 
 两个 job 互不依赖，任一个失败都不影响另一个；使用 GitHub Actions 缓存（`type=gha`，按 backend/frontend 分 scope）加速重复构建。
 
-当前工作流**只构建、不推送镜像仓库**。要发布镜像，在 `docker/build-push-action` 上把 `push` 改为 `true`，补充 `docker/login-action` 登录步骤，并把 `permissions` 加上 `packages: write` 即可。
+### 镜像
+
+主分支推送后，镜像发布到 GitHub Container Registry：
+
+```
+ghcr.io/hourjia/quickshare-backend:latest
+ghcr.io/hourjia/quickshare-backend:<commit-sha>
+ghcr.io/hourjia/quickshare-frontend:latest
+ghcr.io/hourjia/quickshare-frontend:<commit-sha>
+```
+
+拉取前先登录（GHCR 包默认私有，可在包设置里改为 public 后匿名拉取）：
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u hourjia --password-stdin
+docker pull ghcr.io/hourjia/quickshare-backend:latest
+docker pull ghcr.io/hourjia/quickshare-frontend:latest
+```
+
+用发布出来的镜像替代源码构建：
+
+```bash
+docker run -d --name cloudrop-backend -p 8000:8000 \
+  -e DJANGO_SECRET_KEY=... -e CLOUDROP_ACCESS_PASSWORD=... \
+  -e DATABASE_URL=... -e REDIS_URL=... \
+  ghcr.io/hourjia/quickshare-backend:latest
+
+docker run -d --name cloudrop-gateway -p 80:80 -p 443:443 -p 443:443/udp \
+  -e CLOUDROP_DOMAIN=drop.example.com \
+  -e CLOUDROP_BACKEND_UPSTREAM=backend-host:8000 \
+  ghcr.io/hourjia/quickshare-frontend:latest
+```
+
+`workflow_dispatch` 手动触发时只构建和校验，不推送（推送仅在 `main` 分支推送时执行）。
 
 ### 浏览器注意事项
 
