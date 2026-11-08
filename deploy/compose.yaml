@@ -1,0 +1,61 @@
+# 前后端拆分后的组合部署：后端 = 纯 uvicorn 服务，网关 = 前端静态资源 + 反向代理，
+# Coturn 仅在需要中继 WebRTC 时保留。PostgreSQL 与 Redis 使用既有实例，本文件不创建。
+services:
+  backend:
+    build:
+      context: ../backend
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  gateway:
+    build:
+      context: ../frontend
+      dockerfile: deploy/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+  coturn:
+    image: coturn/coturn:4.6.3
+    env_file:
+      - .env
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --no-cli
+      - --log-file=stdout
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${CLOUDROP_TURN_SECRET}
+      - --realm=${CLOUDROP_TURN_REALM}
+      - --external-ip=${CLOUDROP_TURN_EXTERNAL_IP}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --no-multicast-peers
+      - --stale-nonce=600
+
+volumes:
+  caddy_data:
+  caddy_config:

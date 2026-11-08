@@ -1,0 +1,3 @@
+# pnpm 11 起，构建脚本授权从 package.json 迁移到本文件（settings 的新家）。
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 工作区把 shell 脚本签出成 CRLF 后进容器报 bad interpreter。
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

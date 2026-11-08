@@ -1,0 +1,50 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# 打包/参考用的原始压缩包与解压目录
+.temp/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# Django runtime data
+db.sqlite3
+*.sqlite3
+staticfiles/
+media/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+*.tsbuildinfo
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local troubleshooting artifacts
+.cli_fix/
+*.tgz
